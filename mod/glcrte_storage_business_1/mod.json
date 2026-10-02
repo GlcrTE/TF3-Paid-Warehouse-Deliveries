@@ -1,0 +1,35 @@
+{
+    "cosmetic": false,
+    "dependencies": null,
+    "incompatibilities": null,
+    "modId": "glcrte_storage_business_1",
+    "options": null,
+    "params": [
+        {
+            "defaultIndex": 1,
+            "key": "glcrte_sb_rate",
+            "name": "Storage revenue",
+            "tooltip": "Scales the money warehouses earn for stored cargo. The base amount follows the game's difficulty (infrastructure maintenance and cargo income) and the stored cargo: the further down a production chain, the more it earns.",
+            "uiType": "ComboBox",
+            "values": [
+                "Low (50%)",
+                "Normal (100%)",
+                "High (200%)"
+            ],
+            "yearFrom": 0,
+            "yearTo": 0
+        }
+    ],
+    "postRunScript": {
+        "fileName": ""
+    },
+    "preRunScript": {
+        "fileName": ""
+    },
+    "revision": 2,
+    "runScript": {
+        "fileName": ""
+    },
+    "severityAdd": "None",
+    "severityRemove": "None"
+}

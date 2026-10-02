@@ -1,0 +1,15 @@
+{
+    "authors": [
+        {
+            "name": "GlcrTE",
+            "role": "CREATOR"
+        }
+    ],
+    "description": "Warehouses earn money for the cargo they store, paid out monthly. To prevent exploits, only one warehouse per storage type earns within a 1 km circle.",
+    "name": "Storage Business",
+    "summary": "Warehouses earn money for stored cargo.",
+    "tags": [
+        "Script Mod"
+    ],
+    "url": "https://github.com/GlcrTE/TF3-Storage-Business"
+}

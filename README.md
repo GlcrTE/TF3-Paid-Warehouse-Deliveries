@@ -1,21 +1,21 @@
 # Paid Warehouse Deliveries (TF3)
 
-A Transport Fever 3 mod that pays you once for every cargo item delivered to one of your warehouses.
+A Transport Fever 3 mod: when your warehouse takes over cargo, its owner pays you a handling fee, 25% of the delivery price for the distance the cargo has already travelled. The full price is still paid at the final destination.
 
 ## Rules
 
 - The base game pays nothing when cargo arrives in a warehouse. It pays only at the final destination, for the whole trip from where the cargo was produced.
-- With this mod, cargo pays once when a vehicle unloads it at a station or stop that has one of your warehouses in its catchment area (the base game's circle) and it goes into the warehouse. Once the vehicle has finished unloading, its money is booked as one amount, shown above the vehicle like base-game income, as transport income of that vehicle, so it also shows up in the vehicle's and the line's income. Storing it longer earns nothing.
+- With this mod, the cargo's owner pays you a handling fee once when a vehicle unloads the cargo at a station or stop that has one of your warehouses in its catchment area (the base game's circle) and it goes into the warehouse. You're the transport company and the cargo belongs to its producer, so the fee comes from the owner, not from your own warehouse. Once the vehicle has finished unloading, its money is booked as one amount, shown above the vehicle like base-game income, as transport income of that vehicle, so it also shows up in the vehicle's and the line's income. Storing it longer earns nothing.
 - Cargo that the vehicle delivers directly to an industry or town in the same catchment area doesn't pay; the game already pays for that delivery.
-- Each cargo item pays only once, ever. Unloading it again at another warehouse, or moving it back and forth between two, earns nothing extra.
+- Each cargo item pays the fee only once, ever. Unloading it again at another warehouse, or moving it back and forth between two, earns nothing extra.
 
 ### Amount
 
-Payment per cargo item = **share x what the base game pays for delivering cargo over the same distance**.
+Fee per cargo item = **share x what the base game pays for delivering cargo over the same distance**.
 
 The distance is the straight line from where the cargo was produced to the warehouse, plus 8x any climb, the way the base game measures deliveries (`economy/cargo_income.script.lua`). The base game pays about 3.74 per metre for every base game cargo (measured in-game: clay delivered over 2,349 m paid 8,781 per item at the industry), scaled by its *cargo income* setting (50% to 150%; 100% in all presets).
 
-The **share** is the mod option "Warehouse delivery income": 10%, 25% (default), 50% or 100%.
+The **share** is the mod option "Warehouse handling fee": 10%, 25% (default), 50% or 100%.
 
 Example with default settings: coal produced 4 km from the warehouse pays 4,000 m x 3.74 x 25% = 3,740 per item.
 

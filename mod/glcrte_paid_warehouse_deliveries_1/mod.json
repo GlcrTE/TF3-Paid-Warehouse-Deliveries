@@ -8,8 +8,8 @@
         {
             "defaultIndex": 1,
             "key": "glcrte_pwd_share",
-            "name": "Warehouse delivery income",
-            "tooltip": "Cargo pays once when it arrives in one of your warehouses. The payment is this share of what the game pays for delivering the cargo over the same distance (from where it was produced to the warehouse), so it follows the cargo income setting. Each cargo item pays only once.",
+            "name": "Warehouse handling fee",
+            "tooltip": "When your warehouse takes over cargo, its owner pays you a handling fee: this share of the delivery price for the distance the cargo has already travelled (from where it was produced to the warehouse). It follows the cargo income setting. Each cargo item pays the fee only once; the full price is still paid at the final destination.",
             "uiType": "ComboBox",
             "values": [
                 "10%",

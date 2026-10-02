@@ -1,4 +1,7 @@
 -- Paid Warehouse Deliveries
+-- When the player's warehouse takes over cargo, its owner pays a handling fee:
+-- a share of the delivery price for the distance the cargo has already
+-- travelled. The full price is still paid at the final destination.
 -- Cargo pays once when a vehicle unloads it at a stop that has one of the
 -- player's warehouses in its catchment area.
 --

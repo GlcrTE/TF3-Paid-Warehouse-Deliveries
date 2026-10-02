@@ -7,14 +7,15 @@
     "params": [
         {
             "defaultIndex": 1,
-            "key": "glcrte_sb_rate",
-            "name": "Storage revenue",
-            "tooltip": "Scales the money warehouses earn for stored cargo. The base amount follows the game's difficulty (infrastructure maintenance and cargo income) and the stored cargo: the further down a production chain, the more it earns.",
+            "key": "glcrte_sb_share",
+            "name": "Warehouse delivery income",
+            "tooltip": "Cargo pays once when it arrives in one of your warehouses. The payment is this share of what the game pays for delivering the cargo over the same distance (from where it was produced to the warehouse), so it follows the cargo income setting. Each cargo item pays only once.",
             "uiType": "ComboBox",
             "values": [
-                "Low (50%)",
-                "Normal (100%)",
-                "High (200%)"
+                "10%",
+                "25%",
+                "50%",
+                "100%"
             ],
             "yearFrom": 0,
             "yearTo": 0
@@ -26,7 +27,7 @@
     "preRunScript": {
         "fileName": ""
     },
-    "revision": 2,
+    "revision": 1,
     "runScript": {
         "fileName": ""
     },

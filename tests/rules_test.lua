@@ -1,4 +1,4 @@
--- Tests for the revenue rules of storage_business.script.tl.
+-- Tests for the payment rules of storage_business.script.tl.
 -- Run through tools/check.py, which passes a loader for the compiled mod scripts.
 
 return function(load)
@@ -10,106 +10,48 @@ return function(load)
 		table.insert(results, { name, ok, err and tostring(err) or "" })
 	end
 
-	local function storage(id, class, x, y, value)
-		return { id = id, class = class, x = x, y = y, value = value }
-	end
-
-	local function ids(list)
-		local out = {}
-		for _, s in ipairs(list) do
-			table.insert(out, s.id .. s.class)
-		end
-		table.sort(out)
-		return table.concat(out, ",")
-	end
-
 	local function near(a, b)
 		return math.abs(a - b) < 1e-9
 	end
 
-	test("one warehouse per type within 1 km earns, the most valuable one", function()
-		local got = ids(r.selectEarners({
-			storage(1, "BULK", 0, 0, 100),
-			storage(2, "BULK", 500, 0, 300),
-		}, 1000))
-		assert(got == "2BULK", got)
+	test("travel distance is the straight line", function()
+		assert(near(r.travelDistance(300, 400, 0), 500))
 	end)
 
-	test("different storage types do not block each other", function()
-		local got = ids(r.selectEarners({
-			storage(1, "BULK", 0, 0, 100),
-			storage(2, "LIQUID", 10, 0, 100),
-			storage(2, "UNIVERSAL", 10, 0, 50),
-		}, 1000))
-		assert(got == "1BULK,2LIQUID,2UNIVERSAL", got)
+	test("climbing to the target counts 8x extra, descending does not", function()
+		assert(near(r.travelDistance(0, 0, 10), 10 + 80))
+		assert(near(r.travelDistance(0, 0, -10), 10))
 	end)
 
-	test("warehouses 1 km or more apart both earn", function()
-		local got = ids(r.selectEarners({
-			storage(1, "GOODS", 0, 0, 100),
-			storage(2, "GOODS", 1000, 0, 100),
-			storage(3, "GOODS", 0, 1500, 100),
-		}, 1000))
-		assert(got == "1GOODS,2GOODS,3GOODS", got)
+	test("price is 25% of the base game's 3.74 per metre on default settings", function()
+		assert(near(r.pricePerMetre(3, 0.25), 0.935))
 	end)
 
-	test("empty warehouses do not block others", function()
-		local got = ids(r.selectEarners({
-			storage(1, "BULK", 0, 0, 0),
-			storage(2, "BULK", 100, 0, 5),
-		}, 1000))
-		assert(got == "2BULK", got)
+	test("price follows the cargo income setting", function()
+		assert(near(r.pricePerMetre(1, 1.0), 1.87))
+		assert(near(r.pricePerMetre(5, 1.0), 5.61))
+		assert(near(r.pricePerMetre(99, 1.0), 3.74), "out of range falls back to 100%")
 	end)
 
-	test("blocked warehouse does not block a third one", function()
-		local got = ids(r.selectEarners({
-			storage(1, "BULK", 0, 0, 300),
-			storage(2, "BULK", 800, 0, 200),
-			storage(3, "BULK", 1600, 0, 100),
-		}, 1000))
-		assert(got == "1BULK,3BULK", got)
+	test("a cargo item pays only once", function()
+		local paid = {}
+		assert(r.isUnpaid(paid, 42, 1000))
+		paid[42] = 1000
+		assert(not r.isUnpaid(paid, 42, 1000))
 	end)
 
-	test("ties go to the lower entity id", function()
-		local got = ids(r.selectEarners({
-			storage(7, "FLATBED", 0, 0, 50),
-			storage(3, "FLATBED", 10, 0, 50),
-		}, 1000))
-		assert(got == "3FLATBED", got)
+	test("a reused entity id with a new production time pays again", function()
+		local paid = { [42] = 1000 }
+		assert(r.isUnpaid(paid, 42, 5000))
 	end)
 
-	test("cargo factor follows the production chain", function()
-		assert(r.cargoFactor("::/cargos/coal/coal.cargo") == 1.0)
-		assert(r.cargoFactor("::/cargos/steel/steel.cargo") == 1.5)
-		assert(r.cargoFactor("::/cargos/tinned_food/tinned_food.cargo") == 2.0)
-		assert(r.cargoFactor("::/cargos/machines/machines.cargo") == 2.5)
-		assert(r.cargoFactor("::/cargos/vehicles/vehicles.cargo") == 3.0)
-	end)
-
-	test("unknown cargo counts as processed", function()
-		assert(r.cargoFactor("some_mod::/cargos/gold/gold.cargo") == 1.5)
-		assert(r.cargoFactor(nil) == 1.5)
-	end)
-
-	test("rate falls with difficulty", function()
-		local easy, normal, hard, veryHard = r.yearlyRate(1, 3, 1), r.yearlyRate(3, 3, 1), r.yearlyRate(4, 3, 1), r.yearlyRate(5, 3, 1)
-		assert(easy > normal and normal > hard and hard > veryHard, easy .. " " .. normal .. " " .. hard .. " " .. veryHard)
-		assert(near(normal, 12))
-	end)
-
-	test("rate follows cargo income setting and mod scale", function()
-		assert(near(r.yearlyRate(3, 1, 1), 6))
-		assert(near(r.yearlyRate(3, 5, 2), 36))
-		assert(near(r.yearlyRate(99, 99, 1), 12), "out of range falls back to normal")
-	end)
-
-	test("full universal module of raw material earns a quarter of its upkeep on Normal", function()
-		-- 500 units for 360 days at 12 per unit and year
-		assert(r.payoutAmount(500 * 360, r.yearlyRate(3, 3, 1), 360) == 6000)
-	end)
-
-	test("payout rounds down", function()
-		assert(r.payoutAmount(1, 12, 360) == 0)
+	test("pruning forgets only items that no longer exist", function()
+		local paid = { [1] = 10, [2] = 20, [3] = 30 }
+		local dropped = r.prunePaid(paid, function(e, t)
+			return e ~= 2
+		end)
+		assert(dropped == 1)
+		assert(paid[1] == 10 and paid[2] == nil and paid[3] == 30)
 	end)
 
 	return results

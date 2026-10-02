@@ -1,223 +1,93 @@
 -- Storage Business
--- Warehouses ("Lager") earn money for the cargo they store. Once per in-game
--- day the stored cargo of every warehouse is sampled. At the end of each month
--- the samples are paid out as income, so cargo only pays for the days it was
--- actually stored.
+-- Cargo pays once when a vehicle unloads it at a stop that has one of the
+-- player's warehouses in its catchment area.
 --
--- The revenue depends on
--- * the cargo: the further down a production chain, the more it earns
---   (raw materials 1x up to vehicles 3x)
--- * the difficulty: the game's infrastructure maintenance level, scaled by its
---   cargo income setting
--- * the mod option (50% / 100% / 200%)
+-- The base game pays nothing when cargo arrives in a warehouse: it pays only
+-- at the final destination, for the whole trip from where the cargo was
+-- produced. This script listens to OnArriveAtStop. If the stop's station has a
+-- player warehouse in its catchment area (the base game's circle,
+-- catchmentAreaSystem.getStationCatchables), the cargo items on the vehicle
+-- are watched. A watched item that then shows up in a player warehouse pays
+-- once; items delivered directly to an industry or town don't. Each cargo item
+-- pays only once, ever, even if it is unloaded at another warehouse later.
+-- The money is booked like transport income, on the vehicle that brought the
+-- cargo, so it shows up in the vehicle's and the line's income.
 --
--- Exploit prevention: per storage type (the cargo class of a stock: universal,
--- liquid, bulk, flatbed, goods) only one warehouse within a 1 km circle earns.
--- The warehouse whose stored cargo is worth the most wins, the others of the
--- same type within 1 km of it earn nothing for that day.
+-- The payment per item is a share (mod option, default 25%) of what the base
+-- game pays for delivering that cargo over the same distance: the straight-line
+-- distance from where the cargo was produced to the warehouse, plus 8x any
+-- climb, times the cargo price and the game's cargo income setting
+-- (base game economy/cargo_income.script.lua). Short hops earn little, so a
+-- warehouse next to a mine is no money machine.
+--
+-- The game may run the script in several Lua states, so everything that must
+-- survive a call (watched and paid items) lives in the script state, which is
+-- read and written on every arrival and check. Module variables are only caches.
 
 local MOD_TAG <const> = "[Storage Business]"
-local SCALE_PARAM <const> = "glcrte_sb_rate"
+local SHARE_PARAM <const> = "glcrte_sb_share"
 
 local CONFIG <const> = {
-	-- m: per storage type, only one warehouse within this distance earns money
-	exclusionRadius = 1000.0,
-	-- mod option (1-based index): revenue scale
-	scales = { 0.5, 1.0, 2.0 },
-	defaultScale = 2,
-	-- writes every daily sample to the game log
-	debugLog = false,
+	-- mod option (1-based index): share of the base game's delivery price
+	shares = { 0.10, 0.25, 0.50, 1.0 },
+	defaultShare = 2,
+	-- the list of warehouses is read again at most this often (fraction of a
+	-- day), so new warehouses are found
+	refreshPerDay = 8,
+	-- watched cargo items are checked this many times per in-game day
+	checksPerDay = 48,
+	-- also book the income on the line and the vehicle that brought the cargo,
+	-- so it shows up in their statistics
+	bookOnVehicle = true,
+	-- writes every payment and the first arrivals at warehouse stops to the game log
+	diagnostics = false,
+	-- at most this many detailed arrival lines per Lua state
+	diagnosticsLimit = 10,
 }
 
--- Money per stored unit of raw material and year, by the game's infrastructure
--- maintenance level (1-based, as in the difficulty presets: Easy 1, Normal 3,
--- Hard 4, Very Hard 5). On Normal a universal module full of raw material
--- (500 units) earns 6,000 a year, a quarter of its 25,000 maintenance. Full of
--- vehicles it earns 18,000, so storing alone never pays for a warehouse.
-local YEARLY_RATE_BY_LEVEL <const> = { 18.0, 15.0, 12.0, 8.0, 5.0 }
-local DEFAULT_LEVEL <const> = 3
+-- Money per metre and cargo item in the base game, measured like this script
+-- measures (between construction centres): in-game, clay over 2,349 m paid
+-- 8,781, which is 3.74 per metre. Every base game cargo has the same price
+-- (cargotype.script constantFn with initialPrice 4 and finalPrice 3.2 gives
+-- 3.8; the game measures from slightly different points).
+local PRICE_PER_METRE <const> = 3.74
 -- the game's cargo income setting (base game difficulty_util)
 local CARGO_INCOME_SCALE <const> = { 0.5, 0.75, 1.0, 1.25, 1.5 }
 
--- Value factor per cargo, by its depth in the production chain:
--- 1 raw, 2 made from raw materials, 3 made from processed goods, and so on.
-local CARGO_FACTOR <const> : {string : number} = {
-	-- raw materials
-	clay = 1.0, coal = 1.0, crude_oil = 1.0, fish = 1.0, grain = 1.0, iron_ore = 1.0,
-	logs = 1.0, rubber = 1.0, sand = 1.0, stone = 1.0, vegetables = 1.0, wool = 1.0,
-	-- made from raw materials
-	bricks = 1.5, cement = 1.5, chemicals = 1.5, fabric = 1.5, fertilizer = 1.5, fuel = 1.5,
-	glass = 1.5, meat = 1.5, planks = 1.5, sawdust = 1.5, sheet_metal = 1.5, steel = 1.5,
-	tires = 1.5,
-	-- made from processed goods
-	beverages = 2.0, dyes = 2.0, furniture = 2.0, paper = 2.0, plastic = 2.0, tinned_food = 2.0,
-	-- made from goods of the previous step
-	books = 2.5, clothes = 2.5, machines = 2.5, tools = 2.5,
-	vehicles = 3.0,
-}
--- cargo added by other mods
-local UNKNOWN_CARGO_FACTOR <const> = 1.5
-
 ---------------------------------------------------------------------------
--- Revenue rules (pure, no game API)
+-- Payment rules (pure, no game API)
 ---------------------------------------------------------------------------
 
--- the cargo of one storage type stored in one warehouse
-local record Storage
-	id : Engine.Entity
-	class : string
-	x : number
-	y : number
-	-- stored units weighted by cargo factor
-	value : number
+-- base game travel distance: straight line plus 8x the climb to the target
+local function travelDistance(dx : number, dy : number, dz : number) : number
+	return math.sqrt(dx * dx + dy * dy + dz * dz) + 8.0 * math.max(dz, 0.0)
 end
 
--- "::/cargos/coal/coal.cargo" -> 1.0
-local function cargoFactor(resName : string) : number
-	local name = resName ~= nil and resName:match("([%w_]+)%.cargo$") or nil
-	return name ~= nil and CARGO_FACTOR[name] or UNKNOWN_CARGO_FACTOR
+-- money per metre of travel distance and cargo item
+local function pricePerMetre(cargoIncomeLevel : integer, share : number) : number
+	return PRICE_PER_METRE * (CARGO_INCOME_SCALE[cargoIncomeLevel] or 1.0) * share
 end
 
--- money per weighted unit and year for the given (1-based) game settings
-local function yearlyRate(maintenanceLevel : integer, cargoIncomeLevel : integer, scale : number) : number
-	local rate = YEARLY_RATE_BY_LEVEL[maintenanceLevel] or YEARLY_RATE_BY_LEVEL[DEFAULT_LEVEL]
-	return rate * (CARGO_INCOME_SCALE[cargoIncomeLevel] or 1.0) * scale
+-- true if the cargo item was not paid yet. Entity ids can be reused after a
+-- cargo item is delivered, so an item is identified by its id and its
+-- production time.
+local function isUnpaid(paid : {integer : integer}, entity : integer, startTime : integer) : boolean
+	return paid[entity] ~= startTime
 end
 
--- Per storage type, the warehouses that earn: the one whose cargo is worth the
--- most earns, every other one of that type within `radius` of it is skipped, and
--- so on. Empty storages neither earn nor block others.
-local function selectEarners(storages : {Storage}, radius : number) : {Storage}
-	local byClass : {string : {Storage}} = {}
-	for __, s in ipairs(storages) do
-		if s.value > 0 then
-			local list = byClass[s.class]
-			if list == nil then
-				list = {}
-				byClass[s.class] = list
-			end
-			table.insert(list, s)
+-- drops paid cargo items that no longer exist; `alive(entity, startTime)`
+-- tells whether the item still exists. Returns the number of dropped items.
+local function prunePaid(paid : {integer : integer}, alive : function(integer, integer) : boolean) : integer
+	local dead : {integer} = {}
+	for entity, startTime in pairs(paid) do
+		if not alive(entity, startTime) then
+			table.insert(dead, entity)
 		end
 	end
-
-	local out : {Storage} = {}
-	local r2 = radius * radius
-	for __, list in pairs(byClass) do
-		table.sort(list, function(a : Storage, b : Storage) : boolean
-			if a.value ~= b.value then
-				return a.value > b.value
-			end
-			return a.id < b.id
-		end)
-		local picked : {Storage} = {}
-		for __, s in ipairs(list) do
-			local blocked = false
-			for __, p in ipairs(picked) do
-				local dx, dy = s.x - p.x, s.y - p.y
-				if dx * dx + dy * dy < r2 then
-					blocked = true
-					break
-				end
-			end
-			if not blocked then
-				table.insert(picked, s)
-				table.insert(out, s)
-			end
-		end
+	for __, entity in ipairs(dead) do
+		paid[entity] = nil
 	end
-	return out
-end
-
-local function totalValue(earners : {Storage}) : number
-	local sum = 0.0
-	for __, s in ipairs(earners) do
-		sum = sum + s.value
-	end
-	return sum
-end
-
--- `unitDays` weighted units stored for one day each, at `rate` per unit and year
-local function payoutAmount(unitDays : number, rate : number, daysPerYear : number) : integer
-	if daysPerYear <= 0 then
-		return 0
-	end
-	return math.floor(unitDays * rate / daysPerYear)
-end
-
----------------------------------------------------------------------------
--- Reading the warehouses
----------------------------------------------------------------------------
-
-local function isOwnedBy(entity : Engine.Entity, player : Engine.Entity) : boolean
-	local owned : Engine.Component.PlayerOwned = api.engine.getComponent(entity, api.type.ComponentType.PLAYER_OWNED)
-	return owned == nil or owned.player == player
-end
-
-local function stockClass(stock : Engine.Component.StockList.Stock) : string
-	local set = stock.cargoTypes
-	local classes = set ~= nil and set.cargoClassesIncluded or nil
-	if classes ~= nil and classes[1] ~= nil then
-		return classes[1]
-	end
-	return "UNIVERSAL"
-end
-
-local factorCache : {CargoTypeId : number} = {}
-
-local function cargoTypeFactor(cargoType : CargoTypeId) : number
-	local f = factorCache[cargoType]
-	if f == nil then
-		f = cargoFactor(api.res.cargoTypeRep.getName(cargoType))
-		factorCache[cargoType] = f
-	end
-	return f
-end
-
--- weighted value of the cargo in one stock; universal stocks can hold several cargo types
-local function stockValue(stockListEntity : Engine.Entity, stockId : StockId) : number
-	local stockSystem = api.engine.system.simEntityAtStockSystem
-	local value = 0.0
-	for __, cargoType in ipairs(api.engine.util.stock.getStockCargoTypes(stockListEntity, stockId) or {}) do
-		local count = stockSystem.getStockCountForCargoType(stockListEntity, stockId, cargoType) or 0
-		if count > 0 then
-			value = value + count * cargoTypeFactor(cargoType)
-		end
-	end
-	return value
-end
-
-local function collectStorages() : {Storage}
-	local out : {Storage} = {}
-	local player = api.engine.util.getPlayer()
-	local storageStock = api.type["enum"].StockListType.StorageStock
-
-	for __, entity in ipairs(api.engine.getEntitiesWithComponent(api.type.ComponentType.WAREHOUSE) or {}) do
-		local wh : Engine.Component.Warehouse = api.engine.getComponent(entity, api.type.ComponentType.WAREHOUSE)
-		local con : Engine.Component.Construction = nil
-		local stockList : Engine.Component.StockList = nil
-		if wh ~= nil and wh.construction ~= nil and wh.construction >= 0 then
-			con = api.engine.getComponent(wh.construction, api.type.ComponentType.CONSTRUCTION)
-		end
-		if wh ~= nil and wh.stockList ~= nil and wh.stockList >= 0 then
-			stockList = api.engine.getComponent(wh.stockList, api.type.ComponentType.STOCK_LIST)
-		end
-
-		if con ~= nil and stockList ~= nil and isOwnedBy(entity, player) and isOwnedBy(wh.construction, player) then
-			-- a warehouse with several modules of one type has several stocks of that type
-			local byClass : {string : number} = {}
-			for i = 1, #stockList.stocks do
-				local stock = stockList.stocks[i]
-				if stock.type == storageStock then
-					local class = stockClass(stock)
-					byClass[class] = (byClass[class] or 0) + stockValue(wh.stockList, (i - 1) as StockId)
-				end
-			end
-			for class, value in pairs(byClass) do
-				table.insert(out, { id = entity, class = class, x = con.transf[13], y = con.transf[14], value = value })
-			end
-		end
-	end
-	return out
+	return #dead
 end
 
 ---------------------------------------------------------------------------
@@ -241,54 +111,232 @@ local function intParam(params : {string : any}, key : string) : integer
 	return nil
 end
 
-local rateCache : number = nil
+local priceCache : number = nil
 
--- money per weighted unit and year
-local function getRate() : number
-	if rateCache == nil then
+-- money per metre and cargo item for this game
+local function getPricePerMetre() : number
+	if priceCache == nil then
 		local all = modParams()
 		-- the mod option key is unique, so it is found regardless of how params are namespaced
-		local scaleIndex = CONFIG.defaultScale
+		local shareIndex = CONFIG.defaultShare
 		for __, params in pairs(all) do
-			scaleIndex = intParam(params, SCALE_PARAM) or scaleIndex
+			shareIndex = intParam(params, SHARE_PARAM) or shareIndex
 		end
-		local scale = CONFIG.scales[math.max(1, math.min(#CONFIG.scales, scaleIndex))]
-
-		local base = all[""]
-		local maintenanceLevel = intParam(base, "advancedOptions.infrastructureMaintenanceScale") or DEFAULT_LEVEL
-		local cargoIncomeLevel = intParam(base, "advancedOptions.cargoIncome") or 3
-		rateCache = yearlyRate(maintenanceLevel, cargoIncomeLevel, scale)
-		debugPrint(string.format("%s maintenance level %d, cargo income level %d, scale %.2f: %.2f per unit of raw material and year",
-			MOD_TAG, maintenanceLevel, cargoIncomeLevel, scale, rateCache))
+		local share = CONFIG.shares[math.max(1, math.min(#CONFIG.shares, shareIndex))]
+		local cargoIncomeLevel = intParam(all[""], "advancedOptions.cargoIncome") or 3
+		priceCache = pricePerMetre(cargoIncomeLevel, share)
 	end
-	return rateCache
+	return priceCache
+end
+
+---------------------------------------------------------------------------
+-- Reading the game
+---------------------------------------------------------------------------
+
+local function gameTime() : integer
+	local timeComp : Engine.Component.GameTime =
+		api.engine.getComponent(api.engine.util.getWorld(), api.type.ComponentType.GAME_TIME)
+	return timeComp.gameTime
+end
+
+local function isOwnedBy(entity : Engine.Entity, player : Engine.Entity) : boolean
+	local owned : Engine.Component.PlayerOwned = api.engine.getComponent(entity, api.type.ComponentType.PLAYER_OWNED)
+	return owned == nil or owned.player == player
+end
+
+local function exists(entity : Engine.Entity) : boolean
+	return entity ~= nil and entity >= 0 and api.engine.entityExists(entity)
+end
+
+local function getSimCargo(entity : Engine.Entity) : Engine.Component.SimCargo
+	if not exists(entity) then
+		return nil
+	end
+	return api.engine.getComponent(entity, api.type.ComponentType.SIM_CARGO)
+end
+
+-- the construction an entity belongs to, or the entity itself
+local function parentConstruction(entity : Engine.Entity) : Engine.Entity
+	local ok, parent = pcall(api.engine.system.streetConnectorSystem.getConstructionEntityForSubconstruction, entity)
+	if ok and parent ~= nil and parent >= 0 then
+		return parent
+	end
+	return entity
+end
+
+-- position of a construction, or of the construction a subconstruction (e.g.
+-- an industry's stock list) belongs to
+local function entityPosition(entity : Engine.Entity) : {number}
+	if not exists(entity) then
+		return nil
+	end
+	local con : Engine.Component.Construction = api.engine.getComponent(entity, api.type.ComponentType.CONSTRUCTION)
+	if con == nil then
+		con = api.engine.getComponent(parentConstruction(entity), api.type.ComponentType.CONSTRUCTION)
+	end
+	if con == nil then
+		return nil
+	end
+	return { con.transf[13], con.transf[14], con.transf[15] }
+end
+
+local function cargoName(cargoType : CargoTypeId) : string
+	local ok, name = pcall(api.res.cargoTypeRep.getName, cargoType)
+	return ok and tostring(name) or tostring(cargoType)
+end
+
+-- warehouse entities, their stock lists and constructions -> position of the
+-- player's warehouse
+local warehouses : {Engine.Entity : {number}} = nil
+local warehousesReadAt : integer = nil
+
+local function readWarehouses()
+	local out : {Engine.Entity : {number}} = {}
+	local player = api.engine.util.getPlayer()
+	for __, entity in ipairs(api.engine.getEntitiesWithComponent(api.type.ComponentType.WAREHOUSE) or {}) do
+		local wh : Engine.Component.Warehouse = api.engine.getComponent(entity, api.type.ComponentType.WAREHOUSE)
+		if wh ~= nil and wh.construction ~= nil and wh.construction >= 0
+				and isOwnedBy(entity, player) and isOwnedBy(wh.construction, player) then
+			local pos = entityPosition(wh.construction)
+			if pos ~= nil then
+				for __, e in ipairs({ entity, wh.stockList, wh.construction }) do
+					if e ~= nil and e >= 0 then
+						out[e] = pos
+					end
+				end
+			end
+		end
+	end
+	warehouses = out
+	warehousesReadAt = gameTime()
+end
+
+-- position of the player's warehouse an entity (warehouse, its stock list,
+-- its construction or a part of it) belongs to, nil if it is none
+local function warehousePosition(entity : Engine.Entity) : {number}
+	if warehouses == nil or gameTime() - warehousesReadAt >= api.util.getDefaultDayDuration() / CONFIG.refreshPerDay then
+		readWarehouses()
+	end
+	return warehouses[entity] or warehouses[parentConstruction(entity)]
+end
+
+-- the stations of a line stop
+local function stopStations(lineEntity : Engine.Entity, stopIndex : integer) : {Engine.Entity}
+	local line : Engine.Component.Line = api.engine.getComponent(lineEntity, api.type.ComponentType.LINE)
+	local stop = line ~= nil and line.stops[stopIndex + 1] or nil
+	if stop == nil then
+		return {}
+	end
+	local group : Engine.Component.StationGroup = api.engine.getComponent(stop.stationGroup, api.type.ComponentType.STATION_GROUP)
+	return group ~= nil and group.stations or {}
+end
+
+-- The catchment area of a stop: the player warehouses in it (entity and its
+-- construction -> warehouse position, empty if there is none), all other
+-- stocks in it (entities and their constructions), which take cargo directly,
+-- and a description for the diagnostics.
+local function stopCatchment(lineEntity : Engine.Entity, stopIndex : integer) : {Engine.Entity : {number}}, {Engine.Entity : boolean}, string
+	local inReach : {Engine.Entity : {number}} = {}
+	local others : {Engine.Entity : boolean} = {}
+	local stations = stopStations(lineEntity, stopIndex)
+	local found : {string} = {}
+	for __, station in ipairs(stations) do
+		for __, e in ipairs(api.engine.system.catchmentAreaSystem.getStationCatchables(station, true) or {}) do
+			local pos = warehousePosition(e)
+			if pos ~= nil then
+				inReach[e] = pos
+				inReach[parentConstruction(e)] = pos
+				table.insert(found, tostring(e) .. " warehouse")
+			else
+				others[e] = true
+				others[parentConstruction(e)] = true
+				local industry = api.engine.getComponent(e, api.type.ComponentType.INDUSTRY) ~= nil
+				table.insert(found, tostring(e) .. (industry and " industry" or " other"))
+			end
+		end
+	end
+	return inReach, others, string.format("%d stations, catchables: %s", #stations, #found > 0 and table.concat(found, ", ") or "none")
+end
+
+-- the cargo items in a vehicle
+local function vehicleItems(vehicle : Engine.Entity) : {Engine.Entity}
+	local out : {Engine.Entity} = {}
+	local byCargo = api.engine.system.simEntityAtVehicleSystem.getVehicle2Cargo2SimEntitesMap()[vehicle] or {}
+	for __, items in pairs(byCargo) do
+		for __, item in ipairs(items) do
+			table.insert(out, item)
+		end
+	end
+	return out
 end
 
 ---------------------------------------------------------------------------
 -- Game script
 ---------------------------------------------------------------------------
 
+-- a cargo item that was on board when its vehicle arrived at a warehouse stop
+local record Watched
+	startTime : integer
+	-- game time it was added
+	since : integer
+	-- the vehicle and line that brought it to the warehouse stop
+	vehicle : integer
+	line : integer
+end
+
 local record State
-	-- game time of the last daily sample
-	lastSample : integer
-	-- game time of the last monthly payout
-	lastPayout : integer
-	-- weighted stored units times days since the last payout
-	unitDays : number
+	-- game time of the last time the paid list was cleaned up
+	lastPrune : integer
+	-- money earned but not booked yet (less than 1)
+	pending : number
+	-- cargo item entity -> production time, for every item that was paid
+	paid : {integer : integer}
+	-- cargo item entity -> watched item, until it is in a warehouse or gone
+	watched : {integer : Watched}
 end
 
-local function log(msg : string)
-	if CONFIG.debugLog then
-		debugPrint(MOD_TAG .. " " .. msg)
+-- the journal carrier of a vehicle (road, rail, ...), nil if unknown
+local function journalCarrier(vehicle : Engine.Entity) : any
+	local tv : Engine.Component.TransportVehicle = api.engine.getComponent(vehicle, api.type.ComponentType.TRANSPORT_VEHICLE)
+	if tv == nil then
+		return nil
 	end
+	local c = api.type["enum"].Carrier
+	local j = api.type.JournalEntry.Carrier
+	local map : {any : any} = {
+		[c.ROAD] = j.ROAD, [c.RAIL] = j.RAIL, [c.TRAM] = j.TRAM, [c.AIR] = j.AIR, [c.WATER] = j.WATER,
+	}
+	return map[tv.carrier] or j.OTHER
 end
 
-local function bookIncome(amount : integer)
-	local entry = api.type.JournalEntry.new()
-	entry.amount = amount
-	entry.time = -1
-	entry.category.type = api.type.JournalEntry.Type.INCOME
-	api.cmd.sendCommand(api.cmd.makeJournalBookAssetCmd(api.engine.util.getPlayer(), entry, api.type.Vec3f.new(0, 0, 0)))
+-- Books income like the base game's transport income. Every account is a
+-- separate ledger (verified in-game: income booked only on the vehicle did not
+-- reach the player's money), so the amount is booked three times with the
+-- vehicle's carrier: on the player (money and finance window), on the line
+-- (line statistics) and on the vehicle (vehicle statistics). Without a vehicle
+-- it is booked as plain income of the player.
+local function bookIncome(amount : integer, vehicle : Engine.Entity, line : Engine.Entity)
+	local carrier : any = nil
+	if exists(vehicle) then
+		carrier = journalCarrier(vehicle)
+	end
+	local function book(account : Engine.Entity)
+		local entry = api.type.JournalEntry.new()
+		entry.amount = amount
+		entry.time = -1
+		entry.category.type = api.type.JournalEntry.Type.INCOME
+		if carrier ~= nil then
+			(entry.category as {string : any}).carrier = carrier
+		end
+		api.cmd.sendCommand(api.cmd.makeJournalBookAssetCmd(account, entry, api.type.Vec3f.new(0, 0, 0)))
+	end
+	book(api.engine.util.getPlayer())
+	if CONFIG.bookOnVehicle and carrier ~= nil then
+		if exists(line) then
+			book(line)
+		end
+		book(vehicle)
+	end
 end
 
 local errorReported = false
@@ -300,59 +348,195 @@ local function reportError(err : any)
 	end
 end
 
--- the weighted stored cargo of all warehouses that earn today
-local function sample() : number
-	local storages = collectStorages()
-	local earners = selectEarners(storages, CONFIG.exclusionRadius)
-	local value = totalValue(earners)
-	log(string.format("sample: %d storages, %d earning, value %.0f", #storages, #earners, value))
-	return value
+local diagCount = 0
+
+local function diag(msg : string)
+	if CONFIG.diagnostics and diagCount < CONFIG.diagnosticsLimit then
+		diagCount = diagCount + 1
+		debugPrint(string.format("%s [arrival %d] %s", MOD_TAG, diagCount, msg))
+	end
+end
+
+local function alive(entity : integer, startTime : integer) : boolean
+	local simCargo = getSimCargo(entity as Engine.Entity)
+	return simCargo ~= nil and simCargo.startTime == startTime
+end
+
+local function emptyState() : State
+	return { lastPrune = gameTime(), pending = 0, paid = {}, watched = {} }
+end
+
+-- Cargo on board has no stop information (SimEntityAtVehicle.lineStop1 is -1
+-- for cargo) and its target (SimCargo.targetOrPickupEntity) is the final
+-- destination even when it is unloaded into a warehouse on the way (both
+-- verified in-game). So when a vehicle arrives at a stop with a player
+-- warehouse in reach, all items on board are watched, and the update checks
+-- where they end up.
+local function onArriveAtStop(state : GameScriptState<State>, data : ArriveAtStop)
+	local player = api.engine.util.getPlayer()
+	if not exists(data.vehicleEntity) or not isOwnedBy(data.vehicleEntity, player) then
+		return
+	end
+	local inReach, _others, catchment = stopCatchment(data.lineEntity, data.stopIndex)
+	if next(inReach) == nil then
+		diag(string.format("vehicle %d, line %d, stop %d: no warehouse in reach; %s",
+			data.vehicleEntity, data.lineEntity, data.stopIndex, catchment))
+		return
+	end
+
+	local s = state:get()
+	if s == nil or s.paid == nil then
+		s = emptyState()
+	end
+	s.watched = s.watched or {}
+	local now = gameTime()
+	local added = 0
+	for __, item in ipairs(vehicleItems(data.vehicleEntity)) do
+		local simCargo = getSimCargo(item)
+		if simCargo ~= nil and s.watched[item] == nil and isUnpaid(s.paid, item, simCargo.startTime) then
+			s.watched[item] = { startTime = simCargo.startTime, since = now, vehicle = data.vehicleEntity, line = data.lineEntity }
+			added = added + 1
+		end
+	end
+	diag(string.format("vehicle %d, line %d, stop %d: %d items watched; %s",
+		data.vehicleEntity, data.lineEntity, data.stopIndex, added, catchment))
+	if added > 0 then
+		state:set(s)
+	end
+end
+
+-- cargo item -> warehouse position, for every cargo item in a player warehouse
+local function itemsInWarehouses() : {integer : {number}}
+	local out : {integer : {number}} = {}
+	local player = api.engine.util.getPlayer()
+	local stockSystem = api.engine.system.simEntityAtStockSystem
+	for __, entity in ipairs(api.engine.getEntitiesWithComponent(api.type.ComponentType.WAREHOUSE) or {}) do
+		local wh : Engine.Component.Warehouse = api.engine.getComponent(entity, api.type.ComponentType.WAREHOUSE)
+		local pos = wh ~= nil and wh.stockList ~= nil and wh.stockList >= 0 and warehousePosition(entity) or nil
+		if pos ~= nil and isOwnedBy(entity, player) then
+			local stockList : Engine.Component.StockList = api.engine.getComponent(wh.stockList, api.type.ComponentType.STOCK_LIST)
+			for i = 1, stockList ~= nil and #stockList.stocks or 0 do
+				-- getStockEntities returns pairs; the cargo item is the element with a SIM_CARGO component
+				for __, entry in ipairs(stockSystem.getStockEntities(wh.stockList, (i - 1) as StockId) or {}) do
+					local a, b = entry[1] as Engine.Entity, entry[2]
+					local item = getSimCargo(b) ~= nil and b or (getSimCargo(a) ~= nil and a or nil)
+					if item ~= nil then
+						out[item] = pos
+					end
+				end
+			end
+		end
+	end
+	return out
+end
+
+-- where a watched cargo item is now: "warehouse" (with the warehouse
+-- position), "vehicle", "gone" (delivered or destroyed) or "elsewhere"
+-- (between vehicle and stock, or in another stock)
+local function locate(item : integer, w : Watched, inWarehouses : {integer : {number}}) : string, {number}
+	local simCargo = getSimCargo(item as Engine.Entity)
+	if simCargo == nil or simCargo.startTime ~= w.startTime then
+		return "gone", nil
+	end
+	local pos = inWarehouses[item]
+	if pos ~= nil then
+		return "warehouse", pos
+	end
+	if api.engine.getComponent(item as Engine.Entity, api.type.ComponentType.SIM_ENTITY_AT_VEHICLE) ~= nil then
+		return "vehicle", nil
+	end
+	return "elsewhere", nil
+end
+
+-- pays watched items that are now in a player warehouse and forgets the
+-- ones that are gone or watched for longer than a month
+local function settle(s : State, now : integer) : boolean
+	local month = api.util.getDefaultMonthDuration()
+	local done : {integer} = {}
+	local paidItems, gone = 0, 0
+	local money = 0.0
+	-- vehicle -> money earned by the items it brought, and its line
+	local byVehicle : {integer : number} = {}
+	local lineOf : {integer : integer} = {}
+	local inWarehouses = itemsInWarehouses()
+	for item, w in pairs(s.watched) do
+		local where, pos = locate(item, w, inWarehouses)
+		if where == "warehouse" then
+			table.insert(done, item)
+			local simCargo = getSimCargo(item as Engine.Entity)
+			local source = entityPosition(simCargo.sourceEntity)
+			if source ~= nil and isUnpaid(s.paid, item, w.startTime) then
+				s.paid[item] = w.startTime
+				paidItems = paidItems + 1
+				local m = getPricePerMetre() * travelDistance(pos[1] - source[1], pos[2] - source[2], pos[3] - source[3])
+				money = money + m
+				local v = w.vehicle or -1
+				byVehicle[v] = (byVehicle[v] or 0) + m
+				lineOf[v] = w.line or -1
+			end
+		elseif where == "gone" or now - w.since >= month then
+			table.insert(done, item)
+			gone = gone + 1
+		end
+	end
+	for __, item in ipairs(done) do
+		s.watched[item] = nil
+	end
+	if #done == 0 then
+		return false
+	end
+
+	-- no accounting with infinite money
+	local finiteMoney = api.engine.util.finance.getPlayersBalance(api.engine.util.getPlayer()) ~= nil
+	for vehicle, m in pairs(byVehicle) do
+		-- fractions are carried over to the next payment
+		s.pending = (s.pending or 0) + m
+		local amount = math.floor(s.pending)
+		if amount > 0 then
+			s.pending = s.pending - amount
+			if finiteMoney then
+				bookIncome(amount, vehicle as Engine.Entity, lineOf[vehicle] as Engine.Entity)
+				if CONFIG.diagnostics then
+					debugPrint(string.format("%s warehouse delivery income: %d for %d cargo items, vehicle %d", MOD_TAG, amount, paidItems, vehicle))
+				end
+			end
+		end
+	end
+	if CONFIG.diagnostics and gone > 0 then
+		debugPrint(string.format("%s %d watched cargo items did not go into a warehouse", MOD_TAG, gone))
+	end
+
+	if now - (s.lastPrune or 0) >= month then
+		prunePaid(s.paid, alive)
+		s.lastPrune = now
+	end
+	return true
 end
 
 local storageBusiness = {}
 
+-- game time this Lua state last checked the watched items; only saves
+-- reading the state on every update
+local lastCheck : integer = nil
+
 function storageBusiness.update(_userParams : table, state : GameScriptState<State>, dt : number) : any
+	if not state:hasEventSubscriptions() then
+		state:subscribeToEvent("OnArriveAtStop")
+	end
 	if dt == 0.0 then
 		return nil
 	end
 	local ok, err : boolean, any = pcall(function()
-		local timeComp : Engine.Component.GameTime =
-			api.engine.getComponent(api.engine.util.getWorld(), api.type.ComponentType.GAME_TIME)
-		local now = timeComp.gameTime
-		local day = api.util.getDefaultDayDuration()
-		local month = api.util.getDefaultMonthDuration()
-		local daysPerMonth = month / day
-		local daysPerYear = api.util.getDefaultYearDuration() / day
-
-		local s = state:get()
-		if s == nil or s.lastSample == nil or s.lastPayout == nil or now < s.lastSample then
-			-- first run, or the game time was reset: start counting from now
-			state:set({ lastSample = now, lastPayout = now, unitDays = 0 })
+		local now = gameTime()
+		if lastCheck ~= nil and now >= lastCheck and now - lastCheck < api.util.getDefaultDayDuration() / CONFIG.checksPerDay then
 			return
 		end
-
-		local changed = false
-		if now - s.lastSample >= day then
-			-- after a long gap (e.g. the mod was disabled) at most one month counts
-			local days = math.min((now - s.lastSample) / day, daysPerMonth)
-			s.unitDays = (s.unitDays or 0) + sample() * days
-			s.lastSample = now
-			changed = true
+		lastCheck = now
+		local s = state:get()
+		if s == nil or s.watched == nil or next(s.watched) == nil then
+			return
 		end
-
-		if now - s.lastPayout >= month then
-			local amount = payoutAmount(s.unitDays or 0, getRate(), daysPerYear)
-			-- no accounting with infinite money
-			if amount > 0 and api.engine.util.finance.getPlayersBalance(api.engine.util.getPlayer()) ~= nil then
-				bookIncome(amount)
-				debugPrint(MOD_TAG .. " storage income: " .. tostring(amount))
-			end
-			s.unitDays = 0
-			s.lastPayout = now
-			changed = true
-		end
-
-		if changed then
+		if settle(s, now) then
 			state:set(s)
 		end
 	end)
@@ -362,13 +546,23 @@ function storageBusiness.update(_userParams : table, state : GameScriptState<Sta
 	return nil
 end
 
+function storageBusiness.handleEvent(_userParams : table, state : GameScriptState<State>, _src : string, id : string, name : string, param : any) : any
+	if id ~= "TransportVehicleSystem" or name ~= "OnArriveAtStop" then
+		return nil
+	end
+	local ok, err : boolean, any = pcall(onArriveAtStop, state, param as ArriveAtStop)
+	if not ok then
+		reportError(err)
+	end
+	return nil
+end
+
 -- exposed for tests
 ;(storageBusiness as any as {string : any})["rules"] = {
-	selectEarners = selectEarners,
-	totalValue = totalValue,
-	payoutAmount = payoutAmount,
-	cargoFactor = cargoFactor,
-	yearlyRate = yearlyRate,
+	travelDistance = travelDistance,
+	pricePerMetre = pricePerMetre,
+	isUnpaid = isUnpaid,
+	prunePaid = prunePaid,
 }
 
 return storageBusiness

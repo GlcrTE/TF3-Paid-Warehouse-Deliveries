@@ -2,12 +2,12 @@
     "cosmetic": false,
     "dependencies": null,
     "incompatibilities": null,
-    "modId": "glcrte_storage_business_1",
+    "modId": "glcrte_paid_warehouse_deliveries_1",
     "options": null,
     "params": [
         {
             "defaultIndex": 1,
-            "key": "glcrte_sb_share",
+            "key": "glcrte_pwd_share",
             "name": "Warehouse delivery income",
             "tooltip": "Cargo pays once when it arrives in one of your warehouses. The payment is this share of what the game pays for delivering the cargo over the same distance (from where it was produced to the warehouse), so it follows the cargo income setting. Each cargo item pays only once.",
             "uiType": "ComboBox",

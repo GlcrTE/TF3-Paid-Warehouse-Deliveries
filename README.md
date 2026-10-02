@@ -1,4 +1,4 @@
-# Storage Business (TF3)
+# Paid Warehouse Deliveries (TF3)
 
 A Transport Fever 3 mod that pays you once for every cargo item delivered to one of your warehouses.
 
@@ -25,7 +25,7 @@ Without it, a warehouse right next to a mine would earn the full amount on every
 
 ## How it works
 
-`content/storage_business/storage_business.gs.lua` registers a game script (`storage_business.script.tl`) on the simulation side:
+`content/paid_warehouse_deliveries/paid_warehouse_deliveries.gs.lua` registers a game script (`paid_warehouse_deliveries.script.tl`) on the simulation side:
 
 1. The script listens to the game's `OnArriveAtStop` event (vehicle, line, stop index).
 2. It looks up the stop's stations (`LINE` -> stop -> `STATION_GROUP`) and their catchment area with `catchmentAreaSystem.getStationCatchables(station, true)`, the same circle the base game uses. If none of your warehouses is in it, nothing happens.
@@ -45,7 +45,7 @@ Type-checked against the game's definitions, with the rules covered by tests. Te
 - The money showed up once each in the bank account, the finance window (road income), the line statistics and the vehicle statistics.
 - Each truck's unloading was booked as one amount (about 13,000 for 22 items), shown above the truck like base-game income.
 
-The game logs errors as `[Storage Business] error: …`. Set `diagnostics = true` in `storage_business.script.tl` to also log:
+The game logs errors as `[Paid Warehouse Deliveries] error: …`. Set `diagnostics = true` in `paid_warehouse_deliveries.script.tl` to also log:
 
 - the first 10 arrivals per Lua state: `[arrival n] vehicle …, line …, stop …: <n> items watched; catchables …` or `no warehouse in reach`
 - every payment: `warehouse delivery income: <amount> for <n> cargo items, vehicle …`
@@ -55,7 +55,7 @@ The game log is `<Steam>\userdata\<your Steam ID>\3493540\local\crash_dump\stdou
 
 ## Installation
 
-Copy `mod/glcrte_storage_business_1` into your local TF3 mods folder:
+Copy `mod/glcrte_paid_warehouse_deliveries_1` into your local TF3 mods folder:
 
 ```
 <Steam>\userdata\<your Steam ID>\3493540\local\mods\
@@ -74,7 +74,7 @@ python tools/check.py [--game "<TF3 install dir>"]
 
 This checks that `_content.json` lists every file in `content/`, type-checks all `.tl` scripts against the game's definitions, and runs the tests in `tests/`.
 
-Tuning values (shares, diagnostics) are at the top of `storage_business.script.tl`.
+Tuning values (shares, diagnostics) are at the top of `paid_warehouse_deliveries.script.tl`.
 
 ## License
 

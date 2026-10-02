@@ -1,8 +1,8 @@
--- Tests for the payment rules of storage_business.script.tl.
+-- Tests for the payment rules of paid_warehouse_deliveries.script.tl.
 -- Run through tools/check.py, which passes a loader for the compiled mod scripts.
 
 return function(load)
-	local r = load("storage_business/storage_business.script.tl").rules
+	local r = load("paid_warehouse_deliveries/paid_warehouse_deliveries.script.tl").rules
 	local results = {}
 
 	local function test(name, fn)

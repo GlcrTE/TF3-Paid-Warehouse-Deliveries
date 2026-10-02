@@ -1,4 +1,4 @@
--- Storage Business
+-- Paid Warehouse Deliveries
 -- Cargo pays once when a vehicle unloads it at a stop that has one of the
 -- player's warehouses in its catchment area.
 --
@@ -24,8 +24,8 @@
 -- survive a call (watched and paid items) lives in the script state, which is
 -- read and written on every arrival and check. Module variables are only caches.
 
-local MOD_TAG <const> = "[Storage Business]"
-local SHARE_PARAM <const> = "glcrte_sb_share"
+local MOD_TAG <const> = "[Paid Warehouse Deliveries]"
+local SHARE_PARAM <const> = "glcrte_pwd_share"
 
 local CONFIG <const> = {
 	-- mod option (1-based index): share of the base game's delivery price

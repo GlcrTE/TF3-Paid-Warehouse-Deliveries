@@ -7,7 +7,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$modName = 'glcrte_storage_business_1'
+$modName = 'glcrte_paid_warehouse_deliveries_1'
 $source = Join-Path $PSScriptRoot "..\mod\$modName"
 $userdata = 'C:\Program Files (x86)\Steam\userdata'
 $other = if ($Target -eq 'mods') { 'staging_area' } else { 'mods' }

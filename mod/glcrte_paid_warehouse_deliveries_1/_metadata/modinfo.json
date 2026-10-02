@@ -6,10 +6,10 @@
         }
     ],
     "description": "The base game pays nothing when cargo arrives in a warehouse. With this mod, cargo pays a one-time amount when it arrives in one of your warehouses: a share (default 25%) of what the game pays for delivering it over the distance from where it was produced to the warehouse. Each cargo item pays only once, so moving cargo between warehouses earns nothing extra.",
-    "name": "Storage Business",
+    "name": "Paid Warehouse Deliveries",
     "summary": "Warehouses pay once for every cargo item delivered to them.",
     "tags": [
         "Script Mod"
     ],
-    "url": "https://github.com/GlcrTE/TF3-Storage-Business"
+    "url": "https://github.com/GlcrTE/TF3-Paid-Warehouse-Deliveries"
 }

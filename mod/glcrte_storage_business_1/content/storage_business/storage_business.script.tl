@@ -36,6 +36,9 @@ local CONFIG <const> = {
 	refreshPerDay = 8,
 	-- watched cargo items are checked this many times per in-game day
 	checksPerDay = 48,
+	-- a vehicle's money is booked as one amount once no item of it has gone
+	-- into a warehouse for this fraction of a day (its unloading is done)
+	unloadQuietPerDay = 1,
 	-- also book the income on the line and the vehicle that brought the cargo,
 	-- so it shows up in their statistics
 	bookOnVehicle = true,
@@ -284,6 +287,15 @@ local record Watched
 	line : integer
 end
 
+-- money a vehicle earned in its current unloading, not booked yet
+local record Unbooked
+	amount : number
+	items : integer
+	line : integer
+	-- game time of the last item
+	last : integer
+end
+
 local record State
 	-- game time of the last time the paid list was cleaned up
 	lastPrune : integer
@@ -293,6 +305,8 @@ local record State
 	paid : {integer : integer}
 	-- cargo item entity -> watched item, until it is in a warehouse or gone
 	watched : {integer : Watched}
+	-- vehicle -> money it earned in its current unloading
+	unbooked : {integer : Unbooked}
 end
 
 -- the journal carrier of a vehicle (road, rail, ...), nil if unknown
@@ -315,12 +329,36 @@ end
 -- vehicle's carrier: on the player (money and finance window), on the line
 -- (line statistics) and on the vehicle (vehicle statistics). Without a vehicle
 -- it is booked as plain income of the player.
+-- centre of an entity's bounding box (like the base game's entity_util)
+local function boxCentre(entity : Engine.Entity) : Vec3f
+	local bv : Engine.Component.BoundingVolume = api.engine.getComponent(entity, api.type.ComponentType.BOUNDING_VOLUME)
+	if bv == nil then
+		return nil
+	end
+	return (bv.bbox.max + bv.bbox.min) * 0.5
+end
+
+-- position of a vehicle: its first carriage (trains) or the vehicle itself
+local function vehiclePosition(vehicle : Engine.Entity) : Vec3f
+	local carriages : Engine.Component.CarriageList = api.engine.getComponent(vehicle, api.type.ComponentType.CARRIAGE_LIST)
+	if carriages ~= nil and #carriages.carriages > 0 then
+		local pos = boxCentre(carriages.carriages[1] as Engine.Entity)
+		if pos ~= nil then
+			return pos
+		end
+	end
+	return boxCentre(vehicle)
+end
+
 local function bookIncome(amount : integer, vehicle : Engine.Entity, line : Engine.Entity)
 	local carrier : any = nil
+	local pos : Vec3f = nil
 	if exists(vehicle) then
 		carrier = journalCarrier(vehicle)
+		pos = vehiclePosition(vehicle)
 	end
-	local function book(account : Engine.Entity)
+	-- the position shows the amount above the vehicle, like base game income
+	local function book(account : Engine.Entity, at : Vec3f)
 		local entry = api.type.JournalEntry.new()
 		entry.amount = amount
 		entry.time = -1
@@ -328,14 +366,14 @@ local function bookIncome(amount : integer, vehicle : Engine.Entity, line : Engi
 		if carrier ~= nil then
 			(entry.category as {string : any}).carrier = carrier
 		end
-		api.cmd.sendCommand(api.cmd.makeJournalBookAssetCmd(account, entry, api.type.Vec3f.new(0, 0, 0)))
+		api.cmd.sendCommand(api.cmd.makeJournalBookAssetCmd(account, entry, at or api.type.Vec3f.new(0, 0, 0)))
 	end
-	book(api.engine.util.getPlayer())
+	book(api.engine.util.getPlayer(), pos)
 	if CONFIG.bookOnVehicle and carrier ~= nil then
 		if exists(line) then
-			book(line)
+			book(line, nil)
 		end
-		book(vehicle)
+		book(vehicle, nil)
 	end
 end
 
@@ -363,7 +401,7 @@ local function alive(entity : integer, startTime : integer) : boolean
 end
 
 local function emptyState() : State
-	return { lastPrune = gameTime(), pending = 0, paid = {}, watched = {} }
+	return { lastPrune = gameTime(), pending = 0, paid = {}, watched = {}, unbooked = {} }
 end
 
 -- Cargo on board has no stop information (SimEntityAtVehicle.lineStop1 is -1
@@ -458,6 +496,7 @@ local function settle(s : State, now : integer) : boolean
 	-- vehicle -> money earned by the items it brought, and its line
 	local byVehicle : {integer : number} = {}
 	local lineOf : {integer : integer} = {}
+	local itemsOf : {integer : integer} = {}
 	local inWarehouses = itemsInWarehouses()
 	for item, w in pairs(s.watched) do
 		local where, pos = locate(item, w, inWarehouses)
@@ -472,6 +511,7 @@ local function settle(s : State, now : integer) : boolean
 				money = money + m
 				local v = w.vehicle or -1
 				byVehicle[v] = (byVehicle[v] or 0) + m
+				itemsOf[v] = (itemsOf[v] or 0) + 1
 				lineOf[v] = w.line or -1
 			end
 		elseif where == "gone" or now - w.since >= month then
@@ -486,21 +526,15 @@ local function settle(s : State, now : integer) : boolean
 		return false
 	end
 
-	-- no accounting with infinite money
-	local finiteMoney = api.engine.util.finance.getPlayersBalance(api.engine.util.getPlayer()) ~= nil
+	-- one payment per vehicle and unloading, like the base game: the money is
+	-- collected per vehicle and booked when no item has arrived for a while
+	s.unbooked = s.unbooked or {}
 	for vehicle, m in pairs(byVehicle) do
-		-- fractions are carried over to the next payment
-		s.pending = (s.pending or 0) + m
-		local amount = math.floor(s.pending)
-		if amount > 0 then
-			s.pending = s.pending - amount
-			if finiteMoney then
-				bookIncome(amount, vehicle as Engine.Entity, lineOf[vehicle] as Engine.Entity)
-				if CONFIG.diagnostics then
-					debugPrint(string.format("%s warehouse delivery income: %d for %d cargo items, vehicle %d", MOD_TAG, amount, paidItems, vehicle))
-				end
-			end
-		end
+		local u = s.unbooked[vehicle] or { amount = 0, items = 0, line = lineOf[vehicle] }
+		u.amount = u.amount + m
+		u.items = u.items + itemsOf[vehicle]
+		u.last = now
+		s.unbooked[vehicle] = u
 	end
 	if CONFIG.diagnostics and gone > 0 then
 		debugPrint(string.format("%s %d watched cargo items did not go into a warehouse", MOD_TAG, gone))
@@ -514,6 +548,39 @@ local function settle(s : State, now : integer) : boolean
 end
 
 local storageBusiness = {}
+
+-- books the money of vehicles that finished unloading; returns true if
+-- anything was booked
+local function flush(s : State, now : integer) : boolean
+	if s.unbooked == nil or next(s.unbooked) == nil then
+		return false
+	end
+	local quiet = api.util.getDefaultDayDuration() / CONFIG.unloadQuietPerDay
+	-- no accounting with infinite money
+	local finiteMoney = api.engine.util.finance.getPlayersBalance(api.engine.util.getPlayer()) ~= nil
+	local done : {integer} = {}
+	for vehicle, u in pairs(s.unbooked) do
+		if now - u.last >= quiet or now < u.last then
+			table.insert(done, vehicle)
+			-- fractions are carried over to the next payment
+			s.pending = (s.pending or 0) + u.amount
+			local amount = math.floor(s.pending)
+			if amount > 0 then
+				s.pending = s.pending - amount
+				if finiteMoney then
+					bookIncome(amount, vehicle as Engine.Entity, u.line as Engine.Entity)
+					if CONFIG.diagnostics then
+						debugPrint(string.format("%s warehouse delivery income: %d for %d cargo items, vehicle %d", MOD_TAG, amount, u.items, vehicle))
+					end
+				end
+			end
+		end
+	end
+	for __, vehicle in ipairs(done) do
+		s.unbooked[vehicle] = nil
+	end
+	return #done > 0
+end
 
 -- game time this Lua state last checked the watched items; only saves
 -- reading the state on every update
@@ -533,10 +600,17 @@ function storageBusiness.update(_userParams : table, state : GameScriptState<Sta
 		end
 		lastCheck = now
 		local s = state:get()
-		if s == nil or s.watched == nil or next(s.watched) == nil then
+		if s == nil or ((s.watched == nil or next(s.watched) == nil) and (s.unbooked == nil or next(s.unbooked) == nil)) then
 			return
 		end
-		if settle(s, now) then
+		local changed = false
+		if s.watched ~= nil and next(s.watched) ~= nil then
+			changed = settle(s, now)
+		end
+		if flush(s, now) then
+			changed = true
+		end
+		if changed then
 			state:set(s)
 		end
 	end)

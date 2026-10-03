@@ -7,15 +7,15 @@
     "params": [
         {
             "defaultIndex": 1,
-            "key": "glcrte_pwd_share",
-            "name": "Warehouse handling fee",
-            "tooltip": "When your warehouse takes over cargo, its owner pays you a handling fee: this share of the delivery price for the distance the cargo has already travelled (from where it was produced to the warehouse). It follows the cargo income setting. Each cargo item pays the fee only once; the full price is still paid at the final destination.",
+            "key": "glcrte_pwd_margin",
+            "name": "Warehouse profit margin",
+            "tooltip": "When your warehouse takes over cargo, its owner pays you a handling fee per item. Per warehouse and year, the first 730 items pay the warehouse's yearly maintenance, the next 438 items (up to 1168) pay this margin on top, and more items pay nothing. Every module raises the fee; a general storage module by half as much as a specialized one. So a warehouse that is used pays for itself and makes a small profit. Each cargo item pays the fee only once; the full price is still paid at the final destination.",
             "uiType": "ComboBox",
             "values": [
+                "0%",
                 "10%",
                 "25%",
-                "50%",
-                "100%"
+                "50%"
             ],
             "yearFrom": 0,
             "yearTo": 0
@@ -27,7 +27,7 @@
     "preRunScript": {
         "fileName": ""
     },
-    "revision": 1,
+    "revision": 2,
     "runScript": {
         "fileName": ""
     },

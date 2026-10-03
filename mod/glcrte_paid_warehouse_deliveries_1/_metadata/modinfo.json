@@ -9,7 +9,8 @@
     "name": "Paid Warehouse Deliveries",
     "summary": "When your warehouse takes over cargo, its owner pays you a handling fee.",
     "tags": [
-        "Script Mod"
+        "Script Mod",
+        "Warehouse"
     ],
     "url": "https://github.com/GlcrTE/TF3-Paid-Warehouse-Deliveries"
 }
